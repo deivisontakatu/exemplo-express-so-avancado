@@ -1,6 +1,7 @@
 const express = require("express");
 const os = require("os");
 const fs = require("fs");
+const path = require("path");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -12,8 +13,20 @@ function gb(v) {
   return (v / 1024 / 1024 / 1024).toFixed(2);
 }
 
+function mb(v) {
+  return (v / 1024 / 1024).toFixed(2);
+}
+
 function percent(part, total) {
+  if (!total) return "0";
   return ((part / total) * 100).toFixed(0);
+}
+
+function formatUptime(seconds) {
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  return `${days}d ${hours}h ${minutes}m`;
 }
 
 function getIPs() {
@@ -35,23 +48,53 @@ function getIPs() {
   return list;
 }
 
-function getFiles() {
+function getMainIP(ips) {
+  const ip = ips.find(i => !i.internal && i.family === "IPv4");
+  return ip ? ip.address : "N/A";
+}
+
+function getFilesDetailed() {
   try {
-    return fs.readdirSync(".").slice(0, 15);
+    return fs.readdirSync(".").slice(0, 20).map(file => {
+      const stat = fs.statSync(path.join(".", file));
+      return {
+        name: file,
+        type: stat.isDirectory() ? "Dir" : "Arquivo",
+        size: stat.isDirectory() ? "-" : `${(stat.size / 1024).toFixed(2)} KB`,
+        modified: stat.mtime.toLocaleString()
+      };
+    });
   } catch {
     return [];
   }
 }
 
-function cpuDetails() {
-  return os.cpus().map((cpu, index) => ({
-    core: index,
-    model: cpu.model,
-    speed: cpu.speed,
-    user: cpu.times.user,
-    sys: cpu.times.sys,
-    idle: cpu.times.idle
-  }));
+function cpuStats() {
+  return os.cpus().map((cpu, index) => {
+    const t = cpu.times;
+    const total = t.user + t.nice + t.sys + t.idle + t.irq;
+    const used = total - t.idle;
+
+    return {
+      core: index,
+      model: cpu.model,
+      speed: cpu.speed,
+      usage: percent(used, total),
+      idle: t.idle
+    };
+  });
+}
+
+function healthStatus(ramUsage, loadAvg, cores) {
+  if (ramUsage > 85 || loadAvg > cores) {
+    return { label: "ALTO USO", color: "#ef4444" };
+  }
+
+  if (ramUsage > 65 || loadAvg > cores * 0.7) {
+    return { label: "ATENÇÃO", color: "#f59e0b" };
+  }
+
+  return { label: "NORMAL", color: "#22c55e" };
 }
 
 /* =========================
@@ -61,213 +104,330 @@ app.get("/", (req, res) => {
   const total = os.totalmem();
   const free = os.freemem();
   const used = total - free;
-  const ramPercent = percent(used, total);
+  const ramPercent = Number(percent(used, total));
 
-  const cpu = os.cpus();
-  const cpuInfo = cpuDetails();
+  const cpus = cpuStats();
+  const cpuCount = cpus.length;
+  const avgCpu = (
+    cpus.reduce((sum, c) => sum + Number(c.usage), 0) / cpuCount
+  ).toFixed(0);
+
+  const load = os.loadavg();
   const ips = getIPs();
-  const files = getFiles();
+  const mainIP = getMainIP(ips);
+  const files = getFilesDetailed();
 
   const user = os.userInfo();
+  const uptime = os.uptime();
+  const health = healthStatus(ramPercent, load[0], cpuCount);
 
   res.send(`
-  <html>
-  <head>
-    <meta http-equiv="refresh" content="5">
-    <title>SO Dashboard</title>
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="refresh" content="5">
+<title>SO Dashboard 3.0</title>
 
-    <style>
-      body{
-        font-family:Arial;
-        background:#f0f2f5;
-        margin:0;
-        padding:20px;
-      }
+<style>
+body{
+  font-family:Arial, sans-serif;
+  background:#f3f4f6;
+  margin:0;
+  padding:20px;
+}
 
-      h1{
-        text-align:center;
-        margin-bottom:5px;
-      }
+h1{
+  text-align:center;
+  margin-bottom:5px;
+}
 
-      .subtitle{
-        text-align:center;
-        color:#666;
-        margin-bottom:20px;
-      }
+.subtitle{
+  text-align:center;
+  color:#666;
+  margin-bottom:20px;
+}
 
-      .grid{
-        display:grid;
-        grid-template-columns:repeat(auto-fit,minmax(340px,1fr));
-        gap:15px;
-      }
+.grid{
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(340px,1fr));
+  gap:15px;
+}
 
-      .card{
-        background:white;
-        padding:20px;
-        border-radius:14px;
-        box-shadow:0 2px 8px rgba(0,0,0,.08);
-      }
+.top-grid{
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(180px,1fr));
+  gap:15px;
+  margin-bottom:20px;
+}
 
-      .bar{
-        background:#ddd;
-        height:28px;
-        border-radius:8px;
-        overflow:hidden;
-      }
+.card{
+  background:#fff;
+  border-radius:14px;
+  padding:18px;
+  box-shadow:0 2px 8px rgba(0,0,0,.08);
+}
 
-      .fill{
-        background:#4caf50;
-        height:100%;
-        color:white;
-        text-align:center;
-        line-height:28px;
-        font-weight:bold;
-      }
+.kpi{
+  text-align:center;
+}
 
-      table{
-        width:100%;
-        border-collapse:collapse;
-        font-size:13px;
-      }
+.kpi h3{
+  margin:0;
+  font-size:14px;
+  color:#666;
+}
 
-      th,td{
-        padding:6px;
-        border-bottom:1px solid #eee;
-        text-align:left;
-      }
+.kpi .value{
+  font-size:28px;
+  font-weight:bold;
+  margin-top:8px;
+}
 
-      pre{
-        font-size:12px;
-        white-space:pre-wrap;
-      }
+.bar{
+  background:#e5e7eb;
+  height:26px;
+  border-radius:8px;
+  overflow:hidden;
+  margin-top:8px;
+}
 
-      small{
-        color:#666;
-      }
-    </style>
-  </head>
+.fill{
+  background:#2563eb;
+  height:100%;
+  color:#fff;
+  text-align:center;
+  line-height:26px;
+  font-size:13px;
+}
 
-  <body>
+.small{
+  color:#666;
+  font-size:13px;
+}
 
-    <h1>🖥️ SO Dashboard Premium</h1>
-    <div class="subtitle">
-      Atualizado em ${new Date().toLocaleString()}
+table{
+  width:100%;
+  border-collapse:collapse;
+  font-size:13px;
+}
+
+th, td{
+  padding:6px;
+  border-bottom:1px solid #eee;
+  text-align:left;
+}
+
+.badge{
+  display:inline-block;
+  padding:6px 10px;
+  border-radius:999px;
+  color:#fff;
+  font-weight:bold;
+  font-size:12px;
+}
+
+.core{
+  margin-bottom:8px;
+}
+
+.footer{
+  text-align:center;
+  color:#777;
+  margin-top:20px;
+  font-size:12px;
+}
+</style>
+</head>
+
+<body>
+
+<h1>🖥️ SO Dashboard 3.0</h1>
+<div class="subtitle">
+Atualizado em ${new Date().toLocaleString()}
+</div>
+
+<!-- KPIs -->
+<div class="top-grid">
+
+  <div class="card kpi">
+    <h3>RAM</h3>
+    <div class="value">${ramPercent}%</div>
+  </div>
+
+  <div class="card kpi">
+    <h3>CPU Média</h3>
+    <div class="value">${avgCpu}%</div>
+  </div>
+
+  <div class="card kpi">
+    <h3>Uptime</h3>
+    <div class="value">${formatUptime(uptime)}</div>
+  </div>
+
+  <div class="card kpi">
+    <h3>Arquivos</h3>
+    <div class="value">${files.length}</div>
+  </div>
+
+  <div class="card kpi">
+    <h3>IP Principal</h3>
+    <div class="value" style="font-size:18px">${mainIP}</div>
+  </div>
+
+  <div class="card kpi">
+    <h3>Status</h3>
+    <div class="value" style="font-size:18px">
+      <span class="badge" style="background:${health.color}">
+        ${health.label}
+      </span>
     </div>
+  </div>
 
-    <div class="grid">
+</div>
 
-      <!-- Sistema -->
-      <div class="card">
-        <h2>📌 Sistema</h2>
-        <p><b>Host:</b> ${os.hostname()}</p>
-        <p><b>SO:</b> ${os.type()}</p>
-        <p><b>Release:</b> ${os.release()}</p>
-        <p><b>Plataforma:</b> ${os.platform()}</p>
-        <p><b>Arquitetura:</b> ${os.arch()}</p>
-        <p><b>Endianness:</b> ${os.endianness()}</p>
-        <p><b>Node:</b> ${process.version}</p>
-      </div>
+<div class="grid">
 
-      <!-- Usuário -->
-      <div class="card">
-        <h2>👤 Usuário</h2>
-        <p><b>Usuário:</b> ${user.username}</p>
-        <p><b>Home:</b> ${os.homedir()}</p>
-        <p><b>Temp:</b> ${os.tmpdir()}</p>
-        <p><b>Shell:</b> ${user.shell || "N/A"}</p>
-      </div>
+<!-- Sistema -->
+<div class="card">
+<h2>📌 Sistema</h2>
+<p><b>Host:</b> ${os.hostname()}</p>
+<p><b>SO:</b> ${os.type()}</p>
+<p><b>Release:</b> ${os.release()}</p>
+<p><b>Plataforma:</b> ${os.platform()}</p>
+<p><b>Arquitetura:</b> ${os.arch()}</p>
+<p><b>Endianness:</b> ${os.endianness()}</p>
+<p><b>Node:</b> ${process.version}</p>
+<p class="small">Hostname = nome da máquina</p>
+</div>
 
-      <!-- RAM -->
-      <div class="card">
-        <h2>🧠 Memória RAM</h2>
-        <p><b>Total:</b> ${gb(total)} GB</p>
-        <p><b>Usada:</b> ${gb(used)} GB</p>
-        <p><b>Livre:</b> ${gb(free)} GB</p>
+<!-- Usuário -->
+<div class="card">
+<h2>👤 Usuário</h2>
+<p><b>Usuário:</b> ${user.username}</p>
+<p><b>Home:</b> ${os.homedir()}</p>
+<p><b>Temp:</b> ${os.tmpdir()}</p>
+<p><b>Shell:</b> ${user.shell || "N/A"}</p>
+<p><b>UID:</b> ${process.getuid ? process.getuid() : "N/A"}</p>
+<p><b>GID:</b> ${process.getgid ? process.getgid() : "N/A"}</p>
+</div>
 
-        <div class="bar">
-          <div class="fill" style="width:${ramPercent}%">
-            ${ramPercent}%
-          </div>
-        </div>
-      </div>
+<!-- Memória -->
+<div class="card">
+<h2>🧠 Memória RAM</h2>
+<p><b>Total:</b> ${gb(total)} GB</p>
+<p><b>Usada:</b> ${gb(used)} GB</p>
+<p><b>Livre:</b> ${gb(free)} GB</p>
+<p><b>Por CPU:</b> ${(total / cpuCount / 1024 / 1024 / 1024).toFixed(2)} GB</p>
 
-      <!-- CPU -->
-      <div class="card">
-        <h2>⚙️ CPU</h2>
-        <p><b>Núcleos:</b> ${cpu.length}</p>
-        <p><b>Modelo:</b> ${cpu[0].model}</p>
-        <p><b>Clock:</b> ${cpu[0].speed} MHz</p>
-        <p><b>Load Avg:</b> ${os.loadavg().map(v => v.toFixed(2)).join(" | ")}</p>
+<div class="bar">
+  <div class="fill" style="width:${ramPercent}%">
+    ${ramPercent}%
+  </div>
+</div>
 
-        <table>
-          <tr>
-            <th>Core</th>
-            <th>MHz</th>
-            <th>User</th>
-            <th>Idle</th>
-          </tr>
+<p class="small">RAM = memória principal usada pelos processos</p>
+</div>
 
-          ${cpuInfo.map(c => `
-            <tr>
-              <td>${c.core}</td>
-              <td>${c.speed}</td>
-              <td>${c.user}</td>
-              <td>${c.idle}</td>
-            </tr>
-          `).join("")}
-        </table>
-      </div>
+<!-- CPU -->
+<div class="card">
+<h2>⚙️ CPU</h2>
+<p><b>Núcleos:</b> ${cpuCount}</p>
+<p><b>Modelo:</b> ${cpus[0].model}</p>
+<p><b>Load Avg:</b> ${load.map(v => v.toFixed(2)).join(" | ")}</p>
+<p class="small">Load Avg = processos aguardando CPU</p>
 
-      <!-- Rede -->
-      <div class="card">
-        <h2>🌐 Rede</h2>
-
-        <table>
-          <tr>
-            <th>Interface</th>
-            <th>IP</th>
-            <th>Família</th>
-          </tr>
-
-          ${ips.map(ip => `
-            <tr>
-              <td>${ip.interface}</td>
-              <td>${ip.address}</td>
-              <td>${ip.family}</td>
-            </tr>
-          `).join("")}
-        </table>
-      </div>
-
-      <!-- Arquivos -->
-      <div class="card">
-        <h2>📂 Arquivos do Projeto</h2>
-        <ul>
-          ${files.map(file => `<li>${file}</li>`).join("")}
-        </ul>
-      </div>
-
-      <!-- Tempo -->
-      <div class="card">
-        <h2>⏰ Tempo</h2>
-        <p><b>Uptime:</b> ${(os.uptime() / 60).toFixed(1)} minutos</p>
-        <p><b>Timezone:</b> ${Intl.DateTimeFormat().resolvedOptions().timeZone}</p>
-        <p><b>ISO:</b> ${new Date().toISOString()}</p>
-      </div>
-
-      <!-- Cloud -->
-      <div class="card">
-        <h2>☁️ Ambiente</h2>
-        <p><b>Status:</b> ${process.env.RENDER ? "Executando no Render" : "Executando Localmente"}</p>
-        <p><b>PORT:</b> ${process.env.PORT || "3000"}</p>
-        <p><b>NODE_ENV:</b> ${process.env.NODE_ENV || "development"}</p>
-        <small>Cloud Computing + Sistemas Operacionais</small>
-      </div>
-
+${cpus.map(c => `
+<div class="core">
+  <div>Core ${c.core} - ${c.usage}%</div>
+  <div class="bar">
+    <div class="fill" style="width:${c.usage}%">
+      ${c.usage}%
     </div>
+  </div>
+</div>
+`).join("")}
+</div>
 
-  </body>
-  </html>
+<!-- Rede -->
+<div class="card">
+<h2>🌐 Rede</h2>
+<p><b>IP Principal:</b> ${mainIP}</p>
+<p><b>Interfaces:</b> ${ips.length}</p>
+
+<table>
+<tr>
+<th>IF</th>
+<th>IP</th>
+<th>Família</th>
+</tr>
+
+${ips.map(ip => `
+<tr>
+<td>${ip.interface}</td>
+<td>${ip.address}</td>
+<td>${ip.family}</td>
+</tr>
+`).join("")}
+</table>
+</div>
+
+<!-- Arquivos -->
+<div class="card">
+<h2>📂 Arquivos</h2>
+
+<table>
+<tr>
+<th>Nome</th>
+<th>Tipo</th>
+<th>Tamanho</th>
+</tr>
+
+${files.map(f => `
+<tr>
+<td>${f.name}</td>
+<td>${f.type}</td>
+<td>${f.size}</td>
+</tr>
+`).join("")}
+</table>
+</div>
+
+<!-- Tempo -->
+<div class="card">
+<h2>⏰ Tempo</h2>
+<p><b>Uptime:</b> ${formatUptime(uptime)}</p>
+<p><b>Timezone:</b> ${Intl.DateTimeFormat().resolvedOptions().timeZone}</p>
+<p><b>ISO:</b> ${new Date().toISOString()}</p>
+<p class="small">Uptime = tempo desde inicialização</p>
+</div>
+
+<!-- Processo -->
+<div class="card">
+<h2>🔐 Aplicação</h2>
+<p><b>PID:</b> ${process.pid}</p>
+<p><b>Diretório:</b> ${process.cwd()}</p>
+<p><b>Memória Node:</b> ${mb(process.memoryUsage().rss)} MB</p>
+<p><b>Exec Path:</b> ${process.execPath}</p>
+</div>
+
+<!-- Cloud -->
+<div class="card">
+<h2>☁️ Ambiente</h2>
+<p><b>Status:</b> ${process.env.RENDER ? "Executando no Render" : "Executando Localmente"}</p>
+<p><b>PORT:</b> ${process.env.PORT || "3000"}</p>
+<p><b>NODE_ENV:</b> ${process.env.NODE_ENV || "development"}</p>
+<p><b>Kernel AWS:</b> ${os.release().includes("aws") ? "Sim" : "Não"}</p>
+</div>
+
+</div>
+
+<div class="footer">
+SO Dashboard 3.0 • Sistemas Operacionais + Cloud Computing
+</div>
+
+</body>
+</html>
   `);
 });
 
